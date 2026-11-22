@@ -97,6 +97,9 @@ def main() -> int:
     ap.add_argument("--tasks", required=True, help="JSON task file")
     ap.add_argument("--out", required=True, help="where to write the raw results JSON")
     ap.add_argument("--repeat", type=int, default=1, help="runs per task per model")
+    ap.add_argument("--baseline-results",
+                    help="reuse the model-a results from an earlier --out file instead of "
+                         "running model-a again")
     ap.add_argument("--timeout", type=int, default=2400, help="seconds per task run")
     args = ap.parse_args()
 
@@ -104,7 +107,17 @@ def main() -> int:
     models = [m for m in (args.model_a, args.model_b) if m]
     results: dict[str, dict] = {}
 
+    reused = {}
+    if args.baseline_results:
+        reused = json.loads(Path(args.baseline_results).read_text())
+        if args.model_a not in reused:
+            raise SystemExit(f"{args.baseline_results} has no results for {args.model_a}")
+
     for model in models:
+        if model in reused:
+            print(f"reusing {model} from {args.baseline_results}")
+            results[model] = reused[model]
+            continue
         results[model] = {}
         for task in tasks:
             runs = []

@@ -124,6 +124,9 @@ python bench_pi.py --model-a macmini/qwen3.8:27b-nvfp4 \
                    --tasks bench_tasks.json --out results.json
 ```
 
+The baseline can be measured once and reused with `--baseline-results results-a.json`, so
+adding a second model costs only the second set of runs.
+
 The tasks in `bench_tasks.json` are a real Trello card to triage, a real email thread
 to summarize and answer, and a small coding task; the first two run with `bash` and
 `read` only, so the agent cannot change anything.
