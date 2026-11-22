@@ -1,0 +1,17 @@
+[
+  {
+    "id": "trello",
+    "tools": ["bash", "read"],
+    "prompt": "This is a read-only exercise. Do not move, comment, create, edit or archive any Trello card, and do not send email. Use the trello CLI.\n\nRead the Trello card 6b024c4f1f7cc1d654adf940 (its name, description, and every comment). Then answer with:\n\n1. a summary of what the card is about and where the work stands, in at most six lines;\n2. the ONE next action you would take, and why, in at most three lines;\n3. anything in the card that is now stale or contradictory, if any.\n\nBe concise. Do not repeat the card text back to me."
+  },
+  {
+    "id": "email",
+    "tools": ["bash", "read"],
+    "prompt": "This is a read-only exercise. Do not send, archive, label or modify any email.\n\nUse gog with the account andrea@andreazonca.com to read the Gmail thread 1a113c1c785319c5 in full (all messages, in order). Then:\n\n1. summarize the thread and the decisions in it, in at most eight lines;\n2. draft the reply that should be sent next, in the voice of the recipient of the thread (Andrea Zonca), as plain text, with no signature;\n3. list any open question that the draft does not answer.\n\nDo not write any email address into the draft body."
+  },
+  {
+    "id": "coding",
+    "tools": ["bash", "read", "write", "edit"],
+    "prompt": "In the current directory, write a Python module shardcheck.py and a pytest test file test_shardcheck.py.\n\nThe module must work on a Hugging Face safetensors index, that is a dict with a \"weight_map\" key mapping tensor names to shard file names. Provide three functions:\n\n- shards_for_tensors(index, names): returns a dict mapping each shard that holds at least one of the requested tensors to the sorted list of those tensors. Raise KeyError listing the unknown names if any requested name is not in the index.\n- missing_shards(index, present): returns the sorted list of shard names referenced by the index that are not in the set of locally present files.\n- summary(index): returns a dict with the number of tensors, the number of shards, and the name of the shard holding the most tensors.\n\nWrite tests that cover the grouping, an unknown tensor name, missing shards, an empty request, and the summary. Then run pytest and make sure it passes. Report the test result in one line at the end."
+  }
+]

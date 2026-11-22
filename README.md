@@ -42,6 +42,8 @@ each, so `hf_get.py` fetches in parallel ranges and turns nine hours into minute
 | `audit_repo.py` | audit a published repo: local sha256 versus the Hub's `x-linked-etag` for every shard, plus a range-request read of each remote safetensors header to confirm names and dtype |
 | `run_build.sh` | the whole pipeline per shard: download, merge, hash, verify, upload, remote sha check, delete. Resumable |
 | `bench_ollama.py` | prefill, decode and cold-load benchmark for Ollama models, with a prompt nonce so repeats are not served from the prompt cache |
+| `bench_pi.py` | runs the same real tasks through the [pi](https://github.com/earendil-works/pi) agent on two models and reports turns, prompt tokens, generated tokens and wall clock |
+| `bench_tasks.json` | the task set `bench_pi.py` uses: a Trello card to triage, an email thread to summarize and answer, and a small coding task |
 
 ## How the merge maps the adapter onto the checkpoint
 
@@ -107,6 +109,24 @@ prompt sizes. On an Apple Silicon machine the decode number doubles as a
 multi-token-prediction canary: a model whose MTP head survived decodes well above
 the memory-bandwidth bound, and one that lost it drops to roughly that bound. The
 comparison only means something with both models on the same machine.
+
+## Benchmarking an agent workload with pi
+
+A token benchmark says what the model costs per token; an agent benchmark says what a
+task costs, and on a local model the second is the one that matters, because every turn
+re-reads the whole conversation. `bench_pi.py` runs the same prompts through
+[pi](https://github.com/earendil-works/pi) against two model ids and reads pi's JSON
+event stream for turns, prompt tokens, generated tokens and wall clock:
+
+```bash
+python bench_pi.py --model-a macmini/qwen3.8:27b-nvfp4 \
+                   --model-b macmini/qwen3.8-pi:27b-nvfp4 \
+                   --tasks bench_tasks.json --out results.json
+```
+
+The tasks in `bench_tasks.json` are a real Trello card to triage, a real email thread
+to summarize and answer, and a small coding task; the first two run with `bash` and
+`read` only, so the agent cannot change anything.
 
 ## What the verification actually guarantees
 
