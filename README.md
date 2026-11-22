@@ -43,6 +43,7 @@ each, so `hf_get.py` fetches in parallel ranges and turns nine hours into minute
 | `run_build.sh` | the whole pipeline per shard: download, merge, hash, verify, upload, remote sha check, delete. Resumable |
 | `bench_ollama.py` | prefill, decode and cold-load benchmark for Ollama models, with a prompt nonce so repeats are not served from the prompt cache |
 | `bench_pi.py` | runs the same real tasks through the [pi](https://github.com/earendil-works/pi) agent on two models and reports turns, prompt tokens, generated tokens and wall clock |
+| `decode_decompose.py` | splits a decode rate into tokens accepted per forward pass and seconds per forward pass, reading Ollama's `speculative decode stats` for each run, so a slowdown can be attributed to the draft head or to the artifact size |
 | `bench_tasks.json` | the task set `bench_pi.py` uses: a Trello card to triage, an email thread to summarize and answer, and a small coding task |
 
 ## How the merge maps the adapter onto the checkpoint
