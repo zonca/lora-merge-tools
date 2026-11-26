@@ -44,7 +44,7 @@ each, so `hf_get.py` fetches in parallel ranges and turns nine hours into minute
 | `bench_ollama.py` | prefill, decode and cold-load benchmark for Ollama models, with a prompt nonce so repeats are not served from the prompt cache |
 | `bench_pi.py` | runs the same real tasks through the [pi](https://github.com/earendil-works/pi) agent on two models, interleaving them per repetition, and reports turns, prompt tokens, generated tokens, wall clock and the exit status of each task's own check |
 | `decode_decompose.py` | splits a decode rate into tokens accepted per forward pass and seconds per forward pass, reading Ollama's `speculative decode stats` for each run; `--sweep` repeats it over four kinds of content, which is what separates a model property from a property of one prompt |
-| `bench_tasks.json` | the task set `bench_pi.py` uses: a Trello card to triage, an email thread to summarize and answer, and a small coding task |
+| `bench_tasks.json` | the task set `bench_pi.py` uses: two Trello cards to triage, an email thread to summarize and answer, a module to write from a specification, and a bug fix guarded by a hash of the tests |
 
 ## How the merge maps the adapter onto the checkpoint
 
