@@ -1,21 +1,26 @@
 #!/usr/bin/env python3
-"""Decompose the decode rate of two Ollama models into tokens per forward pass.
+"""Attribute a decode slowdown to the draft head or to the artifact size.
 
-decode rate = (tokens accepted per forward pass) * (forward passes per second)
+A decode rate is two numbers multiplied together:
 
-The first factor is the speculative decoder: the server logs
-`speculative decode stats` with the number of iterations, the drafts and the
-accepted tokens, so tokens per pass is 1 + accepted/iterations. The second
-factor is bandwidth bound on this hardware (every pass reads all the weights),
-so seconds per pass should track the artifact size. Measuring both separates
-"the adapter made the model accept fewer drafts" from "the artifact got bigger".
+    decode rate = tokens accepted per forward pass x forward passes per second
 
-Models are unloaded before every measured run and alternate between
-repetitions, so a change in machine state cannot favour one of them. Each run's
-statistics are read from the slice of the log written during that run.
+The first factor is the speculative decoder, the second is bandwidth bound on an
+Apple Silicon machine because every pass reads all the weights. Ollama logs both
+faces of the product (`speculative decode stats` gives iterations, drafts and
+accepted tokens), so reading the log slice written during a measured run gives
+the split without touching the engine.
 
-    python decode_decompose.py --url http://host:11434 \
-        --models qwen3.8:27b-nvfp4 qwen3.8-pi:27b-nvfp4
+With `--sweep` the same measurement is repeated over four kinds of content, which
+is what separates "this model drafts shallower" from "this content happens to be
+hard": deterministic prose, code, an enumerative answer, and creative writing at
+temperature 1.
+
+Models are unloaded before every run and the order alternates between
+repetitions, so machine state cannot favour one of them.
+
+    python decode_decompose.py --url http://host:11434 --ssh-host macmini \
+        --models qwen3.8:27b-nvfp4 qwen3.8-pi:27b-nvfp4 --reps 2 --sweep
 """
 
 from __future__ import annotations
@@ -32,11 +37,47 @@ STATS = re.compile(
     r"iterations=(\d+) drafted=(\d+) accepted=(\d+) acceptance=([0-9.]+) "
     r"avg_draft=([0-9.]+) max_draft=(\d+)"
 )
-PROMPT = (
-    "Write about 500 words of plain prose explaining how a heat pump moves heat "
-    "against a temperature gradient, covering the compressor, the expansion valve "
-    "and the two heat exchangers. No lists."
-)
+
+CONTENTS = [
+    {
+        "name": "prose",
+        "temperature": 0.0,
+        "seed": 21,
+        "prompt": (
+            "Write about 500 words of plain prose explaining how a heat pump moves heat "
+            "against a temperature gradient, covering the compressor, the expansion valve "
+            "and the two heat exchangers. No lists."
+        ),
+    },
+    {
+        "name": "code",
+        "temperature": 0.0,
+        "seed": 22,
+        "prompt": (
+            "Write a Python module that parses a safetensors header from bytes, returns the "
+            "tensor names with their dtype and shape, and merges two shard indexes. Include "
+            "docstrings and about 15 lines of pytest tests. Output only the code."
+        ),
+    },
+    {
+        "name": "enumeration",
+        "temperature": 0.0,
+        "seed": 23,
+        "prompt": (
+            "List twenty concrete reasons why a sharded model checkpoint fails to load, one "
+            "per line, each with a short explanation of how to fix it."
+        ),
+    },
+    {
+        "name": "creative",
+        "temperature": 1.0,
+        "seed": 24,
+        "prompt": (
+            "Write a 400 word short story about a lighthouse keeper who receives a letter "
+            "addressed to someone who does not exist."
+        ),
+    },
+]
 
 
 def post(url: str, payload: dict, timeout: float = 600.0) -> dict:
@@ -62,21 +103,26 @@ def log_slice(host: str, path: str, start: int) -> list[str]:
     return [line for line in out.splitlines() if line.strip()]
 
 
-def sizes(url: str) -> dict[str, int]:
+def artifact_sizes(url: str) -> dict[str, int]:
     with urllib.request.urlopen(f"{url}/api/tags", timeout=60) as response:
         tags = json.load(response)
     return {m["name"]: m["size"] for m in tags["models"]}
 
 
-def measure(url: str, host: str, path: str, model: str) -> dict:
+def measure(url: str, host: str, path: str, model: str, content: dict,
+            num_predict: int) -> dict:
     post(f"{url}/api/generate", {"model": model, "prompt": "", "keep_alive": 0})
     time.sleep(3)
     before = log_lines(host, path)
     result = post(
         f"{url}/api/generate",
         {
-            "model": model, "prompt": PROMPT, "stream": False, "think": False,
-            "options": {"temperature": 0.0, "seed": 21, "num_predict": 512},
+            "model": model, "prompt": content["prompt"], "stream": False, "think": False,
+            "options": {
+                "temperature": content["temperature"],
+                "seed": content["seed"],
+                "num_predict": num_predict,
+            },
         },
     )
     time.sleep(2)
@@ -84,21 +130,18 @@ def measure(url: str, host: str, path: str, model: str) -> dict:
 
     iterations = sum(int(m.group(1)) for m in stats)
     accepted = sum(int(m.group(3)) for m in stats)
+    drafted = sum(int(m.group(2)) for m in stats)
     decode_s = result["eval_duration"] / 1e9
-    tokens = result["eval_count"]
-    tokens_per_iter = (1 + accepted / iterations) if iterations else 0.0
     return {
         "model": model,
-        "tokens": tokens,
+        "content": content["name"],
+        "tokens": result["eval_count"],
         "decode_s": decode_s,
-        "tok_s": tokens / decode_s if decode_s else 0.0,
+        "tok_s": result["eval_count"] / decode_s if decode_s else 0.0,
         "iterations": iterations,
-        "accepted": accepted,
-        "acceptance": accepted / sum(int(m.group(2)) for m in stats) if stats else 0.0,
-        "tokens_per_iter": tokens_per_iter,
+        "tokens_per_iter": (1 + accepted / iterations) if iterations else 0.0,
         "s_per_iter": decode_s / iterations if iterations else 0.0,
-        "load_s": result["load_duration"] / 1e9,
-        "prompt_tokens": result["prompt_eval_count"],
+        "acceptance": accepted / drafted if drafted else 0.0,
         "stats_lines": len(stats),
     }
 
@@ -110,43 +153,59 @@ def main() -> int:
     ap.add_argument("--ssh-host", default="macmini", help="host that owns the Ollama log")
     ap.add_argument("--log", default="/tmp/ollama.err.log")
     ap.add_argument("--models", nargs=2, required=True)
-    ap.add_argument("--reps", type=int, default=3)
+    ap.add_argument("--reps", type=int, default=2)
+    ap.add_argument("--num-predict", type=int, default=400)
+    ap.add_argument("--sweep", action="store_true", help="all four content types")
     ap.add_argument("--json-out")
     args = ap.parse_args()
 
-    size = sizes(args.url)
-    runs: dict[str, list[dict]] = {m: [] for m in args.models}
+    sizes = artifact_sizes(args.url)
+    contents = CONTENTS if args.sweep else CONTENTS[:1]
+    runs: dict[tuple[str, str], list[dict]] = {
+        (m, c["name"]): [] for m in args.models for c in contents
+    }
+
     for rep in range(args.reps):
-        order = args.models if rep % 2 == 0 else list(reversed(args.models))
-        for model in order:
-            r = measure(args.url, args.ssh_host, args.log, model)
-            r["artifact_gb"] = size.get(model, 0) / 1e9
-            runs[model].append(r)
-            print(f"  rep {rep + 1} {model}: {r['tok_s']:.1f} tok/s, "
-                  f"{r['tokens_per_iter']:.2f} tok/pass, {r['s_per_iter'] * 1000:.1f} ms/pass, "
-                  f"acceptance {r['acceptance']:.2f}", flush=True)
+        for content in contents:
+            order = args.models if (rep + contents.index(content)) % 2 == 0 \
+                else list(reversed(args.models))
+            for model in order:
+                r = measure(args.url, args.ssh_host, args.log, model, content,
+                            args.num_predict)
+                runs[(model, content["name"])].append(r)
+                print(f"  rep {rep + 1} {content['name']:12s} {model:22s} "
+                      f"{r['tok_s']:5.1f} tok/s  {r['tokens_per_iter']:.2f} tok/pass  "
+                      f"{r['s_per_iter'] * 1000:5.1f} ms/pass  acc {r['acceptance']:.2f}",
+                      flush=True)
 
-    print("\n| model | decode | tokens/pass | ms/pass | acceptance | GB/pass (effective) |")
+    print("\n| content | model | decode | tokens/pass | ms/pass | acceptance |")
     print("|---|---|---|---|---|---|")
-    summary = {}
-    for model in args.models:
-        rows = runs[model]
-        med = lambda k: statistics.median(r[k] for r in rows)  # noqa: E731
-        summary[model] = {k: med(k) for k in
-                          ("tok_s", "tokens_per_iter", "s_per_iter", "acceptance", "artifact_gb")}
-        bw = summary[model]["artifact_gb"] / summary[model]["s_per_iter"]
-        print(f"| `{model}` | {med('tok_s'):.1f} tok/s | {med('tokens_per_iter'):.2f} | "
-              f"{med('s_per_iter') * 1000:.1f} | {med('acceptance'):.2f} | {bw:.0f} GB/s |")
+    for content in contents:
+        for model in args.models:
+            rows = runs[(model, content["name"])]
+            if not rows:
+                continue
+            med = lambda k: statistics.median(r[k] for r in rows)  # noqa: E731
+            print(f"| {content['name']} | `{model}` | {med('tok_s'):.1f} tok/s | "
+                  f"{med('tokens_per_iter'):.2f} | {med('s_per_iter') * 1000:.1f} | "
+                  f"{med('acceptance'):.2f} |")
 
-    a, b = (summary[m] for m in args.models)
-    print(f"\nartifact ratio b/a:      {b['artifact_gb'] / a['artifact_gb']:.3f}")
-    print(f"tokens per pass ratio:   {b['tokens_per_iter'] / a['tokens_per_iter']:.3f}")
-    print(f"seconds per pass ratio:  {b['s_per_iter'] / a['s_per_iter']:.3f}")
-    print(f"decode ratio:            {b['tok_s'] / a['tok_s']:.3f}")
+    print("\n| content | decode ratio | tokens/pass ratio | ms/pass ratio |")
+    print("|---|---|---|---|")
+    for content in contents:
+        a = runs[(args.models[0], content["name"])]
+        b = runs[(args.models[1], content["name"])]
+        med = lambda rows, k: statistics.median(r[k] for r in rows)  # noqa: E731
+        print(f"| {content['name']} | {med(b, 'tok_s') / med(a, 'tok_s'):.2f} | "
+              f"{med(b, 'tokens_per_iter') / med(a, 'tokens_per_iter'):.2f} | "
+              f"{med(b, 's_per_iter') / med(a, 's_per_iter'):.2f} |")
 
+    print(f"\nartifact sizes: " + ", ".join(f"{m} {s / 1e9:.2f} GB"
+                                            for m, s in sizes.items()
+                                            if m in args.models))
     if args.json_out:
         with open(args.json_out, "w") as fh:
-            json.dump(runs, fh, indent=2)
+            json.dump({f"{m}|{c}": v for (m, c), v in runs.items()}, fh, indent=2)
         print(f"raw runs: {args.json_out}")
     return 0
 

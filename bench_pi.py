@@ -1,31 +1,38 @@
 #!/usr/bin/env python3
 """Run the same real tasks through pi on two models and compare the cost.
 
-Each task is a prompt plus a tool allowlist. The runner gives every task a
-fresh working directory, runs `pi -p --mode json` on it, and reads the event
-stream for the numbers that describe an agent workload:
+Each task is a prompt, a tool allowlist, an optional setup command and an
+optional verify command. The runner gives every task a fresh working directory,
+runs `pi -p --mode json` on it, then runs the verify command and records whether
+the result actually works, which is the only way to tell a fast answer from a
+correct one.
 
-* **turns**, the number of model calls, which is what a tool-efficiency gain
-  shows up as;
+What it records, per run:
+
+* **turns**, the number of model calls;
 * **prompt tokens processed** (sum of `usage.input`), because every turn
   re-reads the whole conversation and that is the prefill cost;
 * **generated tokens** (sum of `usage.output`);
-* **wall clock** for the whole task.
+* **wall clock**;
+* **verify**, exit status of the task's own check (tests, file unchanged).
 
-The tasks are read-only by construction: the agent is told not to send, move,
-comment or create anything, and the tool allowlist keeps `write` and `edit`
-away from the Trello and email tasks.
+The two models are interleaved inside each repetition, so a change in machine
+state cannot favour one of them, and repetitions are the outer loop so the
+spread of a single task is visible.
+
+The Trello and email tasks run with only `bash` and `read`, and the prompt says
+plainly not to change anything, so the agent cannot move a card or send mail
+while being measured.
 
     python bench_pi.py --model-a macmini/qwen3.8:27b-nvfp4 \
                        --model-b macmini/qwen3.8-pi:27b-nvfp4 \
-                       --tasks tasks.json --out results.json
+                       --tasks bench_tasks.json --repeat 2 --out results.json
 """
 
 from __future__ import annotations
 
 import argparse
 import json
-import os
 import statistics
 import subprocess
 import sys
@@ -89,6 +96,12 @@ def run_pi(model: str, prompt: str, workdir: Path, tools: list[str] | None,
     }
 
 
+def run_verify(command: str, workdir: Path) -> dict:
+    proc = subprocess.run(command, shell=True, cwd=workdir, capture_output=True, text=True)
+    tail = (proc.stdout + proc.stderr).strip().splitlines()[-3:]
+    return {"verify_rc": proc.returncode, "verify_tail": " | ".join(tail)[:300]}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -96,75 +109,77 @@ def main() -> int:
     ap.add_argument("--model-b", help="candidate model; omit to measure only the baseline")
     ap.add_argument("--tasks", required=True, help="JSON task file")
     ap.add_argument("--out", required=True, help="where to write the raw results JSON")
-    ap.add_argument("--repeat", type=int, default=1, help="runs per task per model")
-    ap.add_argument("--baseline-results",
-                    help="reuse the model-a results from an earlier --out file instead of "
-                         "running model-a again")
+    ap.add_argument("--repeat", type=int, default=1, help="repetitions of the whole task set")
     ap.add_argument("--timeout", type=int, default=2400, help="seconds per task run")
     args = ap.parse_args()
 
     tasks = json.loads(Path(args.tasks).read_text())
     models = [m for m in (args.model_a, args.model_b) if m]
-    results: dict[str, dict] = {}
+    results: dict[str, dict[str, list[dict]]] = {m: {t["id"]: [] for t in tasks} for m in models}
 
-    reused = {}
-    if args.baseline_results:
-        reused = json.loads(Path(args.baseline_results).read_text())
-        if args.model_a not in reused:
-            raise SystemExit(f"{args.baseline_results} has no results for {args.model_a}")
-
-    for model in models:
-        if model in reused:
-            print(f"reusing {model} from {args.baseline_results}")
-            results[model] = reused[model]
-            continue
-        results[model] = {}
-        for task in tasks:
-            runs = []
-            for rep in range(args.repeat):
+    for rep in range(args.repeat):
+        for index, task in enumerate(tasks):
+            order = models if (rep + index) % 2 == 0 else list(reversed(models))
+            for model in order:
                 workdir = Path(tempfile.mkdtemp(prefix=f"pibench-{task['id']}-"))
                 if task.get("setup"):
                     subprocess.run(task["setup"], shell=True, cwd=workdir, check=False)
-                print(f"\n== {model} / {task['id']} (run {rep + 1})", flush=True)
+                print(f"\n== {model} / {task['id']} (rep {rep + 1})", flush=True)
                 try:
-                    r = run_pi(model, task["prompt"], workdir, task.get("tools"),
-                               args.timeout)
+                    r = run_pi(model, task["prompt"], workdir, task.get("tools"), args.timeout)
                 except subprocess.TimeoutExpired:
-                    r = {"wall_s": args.timeout, "turns": 0, "tool_calls": 0,
-                         "tool_names": [], "input_tokens": 0, "output_tokens": 0,
-                         "final_text": "", "returncode": -1, "stderr_tail": "",
+                    r = {"wall_s": args.timeout, "turns": 0, "tool_calls": 0, "tool_names": [],
+                         "input_tokens": 0, "output_tokens": 0, "final_text": "",
+                         "returncode": -1, "stderr_tail": "",
                          "error": f"timeout after {args.timeout}s"}
-                print(f"   {r['wall_s']:.0f} s, {r['turns']} turns, "
-                      f"{r['tool_calls']} tool calls, "
-                      f"{r['input_tokens']} in / {r['output_tokens']} out", flush=True)
+                if task.get("verify"):
+                    r.update(run_verify(task["verify"], workdir))
+                else:
+                    r.update({"verify_rc": None, "verify_tail": ""})
+                print(f"   {r['wall_s']:.0f} s, {r['turns']} turns, {r['tool_calls']} tool calls, "
+                      f"{r['input_tokens']} in / {r['output_tokens']} out, "
+                      f"verify {'n/a' if r['verify_rc'] is None else r['verify_rc']}", flush=True)
                 if r["error"]:
                     print(f"   error: {r['error']}", flush=True)
-                runs.append(r)
-            results[model][task["id"]] = runs
+                r["workdir"] = str(workdir)
+                results[model][task["id"]].append(r)
 
     Path(args.out).write_text(json.dumps(results, indent=2) + "\n")
 
-    print("\n| task | model | wall (s) | turns | tool calls | prompt tok | gen tok |")
-    print("|---|---|---|---|---|---|---|")
+    def med(rows, key):
+        return statistics.median(r[key] for r in rows)
+
+    print("\n| task | model | wall (s) | turns | tool calls | prompt tok | gen tok | verify |")
+    print("|---|---|---|---|---|---|---|---|")
     for task in tasks:
         for model in models:
-            runs = results[model][task["id"]]
-            med = lambda key: statistics.median(r[key] for r in runs)  # noqa: E731
-            print(f"| {task['id']} | `{model}` | {med('wall_s'):.0f} | {med('turns'):.0f} | "
-                  f"{med('tool_calls'):.0f} | {med('input_tokens'):.0f} | "
-                  f"{med('output_tokens'):.0f} |")
+            rows = results[model][task["id"]]
+            if not rows:
+                continue
+            checks = [r["verify_rc"] for r in rows if r["verify_rc"] is not None]
+            verified = ("n/a" if not checks else
+                        f"{sum(1 for c in checks if c == 0)}/{len(checks)}")
+            print(f"| {task['id']} | `{model}` | {med(rows, 'wall_s'):.0f} | "
+                  f"{med(rows, 'turns'):.0f} | {med(rows, 'tool_calls'):.0f} | "
+                  f"{med(rows, 'input_tokens'):.0f} | {med(rows, 'output_tokens'):.0f} | "
+                  f"{verified} |")
 
     if len(models) == 2:
         print("\n| task | wall ratio B/A | turn ratio B/A | gen-token ratio B/A |")
         print("|---|---|---|---|")
+        walls, gens = [], []
         for task in tasks:
             a, b = results[models[0]][task["id"]], results[models[1]][task["id"]]
-            am = lambda key: statistics.median(r[key] for r in a)  # noqa: E731
-            bm = lambda key: statistics.median(r[key] for r in b)  # noqa: E731
+            if not a or not b:
+                continue
             ratio = lambda x, y: (y / x) if x else 0.0  # noqa: E731
-            print(f"| {task['id']} | {ratio(am('wall_s'), bm('wall_s')):.2f}x | "
-                  f"{ratio(am('turns'), bm('turns')):.2f}x | "
-                  f"{ratio(am('output_tokens'), bm('output_tokens')):.2f}x |")
+            walls.append(ratio(med(a, "wall_s"), med(b, "wall_s")))
+            gens.append(ratio(med(a, "output_tokens"), med(b, "output_tokens")))
+            print(f"| {task['id']} | {walls[-1]:.2f}x | "
+                  f"{ratio(med(a, 'turns'), med(b, 'turns')):.2f}x | {gens[-1]:.2f}x |")
+        if walls:
+            print(f"\nmedian over tasks: wall {statistics.median(walls):.2f}x, "
+                  f"generated tokens {statistics.median(gens):.2f}x")
 
     print(f"\nraw results: {args.out}")
     return 0

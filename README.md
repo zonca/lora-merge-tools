@@ -42,8 +42,8 @@ each, so `hf_get.py` fetches in parallel ranges and turns nine hours into minute
 | `audit_repo.py` | audit a published repo: local sha256 versus the Hub's `x-linked-etag` for every shard, plus a range-request read of each remote safetensors header to confirm names and dtype |
 | `run_build.sh` | the whole pipeline per shard: download, merge, hash, verify, upload, remote sha check, delete. Resumable |
 | `bench_ollama.py` | prefill, decode and cold-load benchmark for Ollama models, with a prompt nonce so repeats are not served from the prompt cache |
-| `bench_pi.py` | runs the same real tasks through the [pi](https://github.com/earendil-works/pi) agent on two models and reports turns, prompt tokens, generated tokens and wall clock |
-| `decode_decompose.py` | splits a decode rate into tokens accepted per forward pass and seconds per forward pass, reading Ollama's `speculative decode stats` for each run, so a slowdown can be attributed to the draft head or to the artifact size |
+| `bench_pi.py` | runs the same real tasks through the [pi](https://github.com/earendil-works/pi) agent on two models, interleaving them per repetition, and reports turns, prompt tokens, generated tokens, wall clock and the exit status of each task's own check |
+| `decode_decompose.py` | splits a decode rate into tokens accepted per forward pass and seconds per forward pass, reading Ollama's `speculative decode stats` for each run; `--sweep` repeats it over four kinds of content, which is what separates a model property from a property of one prompt |
 | `bench_tasks.json` | the task set `bench_pi.py` uses: a Trello card to triage, an email thread to summarize and answer, and a small coding task |
 
 ## How the merge maps the adapter onto the checkpoint
@@ -128,9 +128,11 @@ python bench_pi.py --model-a macmini/qwen3.8:27b-nvfp4 \
 The baseline can be measured once and reused with `--baseline-results results-a.json`, so
 adding a second model costs only the second set of runs.
 
-The tasks in `bench_tasks.json` are a real Trello card to triage, a real email thread
-to summarize and answer, and a small coding task; the first two run with `bash` and
-`read` only, so the agent cannot change anything.
+The tasks in `bench_tasks.json` are two real Trello cards to triage, a real email thread
+to summarize and answer, and two small coding tasks, one of which is a bug fix with its
+tests hash-guarded. The reading tasks run with `bash` and `read` only, so the agent
+cannot change anything, and each coding task carries a `verify` command that is run
+after the agent exits, because a fast answer is only interesting if it works.
 
 ## What the verification actually guarantees
 
