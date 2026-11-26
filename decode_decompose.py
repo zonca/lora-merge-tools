@@ -177,6 +177,9 @@ def main() -> int:
                       f"{r['tok_s']:5.1f} tok/s  {r['tokens_per_iter']:.2f} tok/pass  "
                       f"{r['s_per_iter'] * 1000:5.1f} ms/pass  acc {r['acceptance']:.2f}",
                       flush=True)
+                if args.json_out:
+                    with open(args.json_out, "w") as fh:
+                        json.dump({f"{m}|{c}": v for (m, c), v in runs.items()}, fh, indent=2)
 
     print("\n| content | model | decode | tokens/pass | ms/pass | acceptance |")
     print("|---|---|---|---|---|---|")

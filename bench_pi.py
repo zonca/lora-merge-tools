@@ -143,6 +143,8 @@ def main() -> int:
                     print(f"   error: {r['error']}", flush=True)
                 r["workdir"] = str(workdir)
                 results[model][task["id"]].append(r)
+                # incremental save: a ten-repetition campaign runs for hours
+                Path(args.out).write_text(json.dumps(results, indent=2) + "\n")
 
     Path(args.out).write_text(json.dumps(results, indent=2) + "\n")
 
